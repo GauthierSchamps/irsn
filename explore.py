@@ -21,7 +21,7 @@ file_count = 0
 
 all_modules = [] #Also includes sub_modules
 
-file_db = 'chemin_jdd2.txt' #File containing all paths to .pel files 
+file_db = 'chemin_jdd3.txt' #File containing all paths to .pel files 
 
 file_response = 'resp.txt' #File which will contains the response of the programm /!\ Existing content will be overwritten
 
@@ -34,10 +34,13 @@ data_obtained = []
 module_obtained = []
 
 def read_file_func(file_path, encoding='utf-8', leng=1024):
-    count_char = subprocess.run(['wc', '-m', file_path], text=True, capture_output=True).stdout.split()[0]
-    
+    try:
+        count_char = subprocess.run(['wc', '-m', file_path], text=True, capture_output=True).stdout.split()[0]
+    except IndexError:
+        print(file_path)
+        return
     with open(file_path, 'rb') as file:
-        buffer = b''  
+        buffer = b''  # Garder les données entre les lectures
         
         while True and int(file.tell()) < int(count_char):
             container = file.read(leng)
@@ -46,6 +49,7 @@ def read_file_func(file_path, encoding='utf-8', leng=1024):
 
             buffer += container
 
+            # Tenter de décoder jusqu'à la fin d'une ligne
             try:
                 temp = buffer.decode(encoding)
                 lines = temp.splitlines(keepends=True)
@@ -65,8 +69,10 @@ def read_file_func(file_path, encoding='utf-8', leng=1024):
                 
                 buffer = b''
 
+        # Décodage du buffer restant sans erreur
         if buffer:
             yield buffer.decode(encoding, errors='ignore')
+
 
 class module_pel:
     def __init__(self, name, condition=None, parent=None):
@@ -75,7 +81,7 @@ class module_pel:
         self.name = name
         self.sub_modules = []
         self.parent = parent
-        self.affectations = {} # Key : name of the affectation | Value : class affectation related
+        self.affectations = [] 
         self.inclusions = [] #All #include() elements
         self.conditions = condition  # If a condition is required to launch the module (especially for sub_modules), None else 
         all_modules.append(self)
@@ -84,12 +90,14 @@ class module_pel:
             parent.addSub(self)
             
     def addAffectation(self, aff):
-        dic = self.affectations.get(aff['name'])
-        if dic is None:
-            self.affectations[aff['name']] = affectation(aff['name'],aff['value'])
-        else:
-            dic.found()
-        self.affectations[aff['name']].add(aff['value'])
+        for affect in self.affectations:
+            if affect.name == aff['name']:
+                affect.found()
+                affect.add(aff['value'])
+                return
+        affect = affectation(aff['name'],self)
+        affect.add(aff['value'].strip())
+        self.affectations.append(affect)
 
     def addSub(self, module):
         self.sub_modules.append(module)
@@ -110,27 +118,34 @@ class affectation:
             data_count += 1
             self.values.add(value)
         
-    def getValue(self):
-        resp = []
-        for value in self.values:
-            resp.append(value)
-        return resp
     def display(self):
         resp = "["
-        freq = self.appearance / file_count * 100
+        freq = calc_aff_appearance(self) * 100
         freq_txt = f"({freq:.2f}%)"
         values_list = list(self.values)
         for i in range(len(values_list)):
             if i > 0:
                 resp += ", "
             resp += str(values_list[i])
-            resp += "]"
-            resp = self.name + " " + freq_txt +" = "+ resp
-        return resp
+            
+            ret = self.name + " " + freq_txt +" = " + resp
+        ret += "]"
+        return ret
     
     def found(self):
         self.appearance += 1
-    
+        
+def calc_appearance(mod):
+    perc = mod.appearance / file_count
+    if mod.parent is None:
+        return perc
+    else:
+        return perc / calc_appearance(mod.parent)
+
+def calc_aff_appearance(aff):
+    freq_mod = calc_appearance(aff.module)
+    return aff.appearance / aff.module.appearance
+            
 def convert_value_explicit(value,dictionary):
     # Use this fonction for replace global variables by their value keeping their original name
     
@@ -161,8 +176,10 @@ def row_type(row):
         return 'closer'
     elif "#include" in row:
         return 'inclusion'
-    elif row.strip() == "" or "MODULE PEL_Application" in row: #This Module is the container of all others, we dont consider it
+    elif row.strip() == "": #This Module is the container of all others, we dont consider it
         return 'empty'
+    elif "PEL_Application" in row:
+        return 'open doc'
     elif 'MODULE' in row:
         return 'opener'
     elif row.strip()[0] == "$":
@@ -213,7 +230,8 @@ def deal_module(lines,cond,parent=None):
             return (i + 2), mod 
         elif line_type == 'inclusion':
             i += 1
-            mod.inclusions.append(line.rstrip().lstrip())
+            if line.rstrip().lstrip() not in mod.inclusions:
+                mod.inclusions.append(line.rstrip().lstrip())
         elif line_type == 'opener':
             dealing = deal_module(lines[i:],cond,mod)
             jump = dealing[0]
@@ -287,7 +305,7 @@ def main():
             file_analysed.append(file_count)
             data_obtained.append(data_count)
             module_obtained.append(module_count)
-        file_count += 1
+        
         
         file_affectations = {} #Keep a track of all local affectation
 		
@@ -309,6 +327,10 @@ def main():
                 i += jump 
             elif line_type == 'empty':
                 i += 1
+                continue
+            elif line_type =='open doc':
+                i += 1
+                file_count += 1
                 continue
             elif line_type == 'global_variable':
                 while check_concat(lines[i + 1]):
@@ -337,8 +359,8 @@ def main():
     
     for mod in all_modules:
         
-        for affectations in mod.affectations:
-            aff = mod.affectations[affectations]
+        for aff in mod.affectations:
+            
             val_list = list(aff.values)
             for val in val_list:
                 #Non explicit affectation
@@ -346,16 +368,16 @@ def main():
                 while "$" in val:
                     val = convert_value_explicit(val,global_variables)
                     
-                aff.values.add(val)
+                aff.add(val.strip())
 		
 	# Once all data are handled we display them in the .txt file
 	# -> Introduce a module
 	# $ Introduce an affectation (followed by a list of all possible values)
-  # § Is used for data on the original pel file
     content = ""
     u = 0
+    all_modules.sort(key= lambda x: x.appearance,reverse=True)
     for _module in all_modules:
-        
+       
         if _module.parent is None:
             content += print_module(_module, 0)				
     with open(file_response , 'w') as fichier:
@@ -363,23 +385,28 @@ def main():
 
 def print_module(mod,layer):
     global file_count 
-    freq = mod.appearance / file_count * 100 
+    freq = calc_appearance(mod) * 100 
     freq_txt = f" ({freq:.2f}%) "
-    resp = "\t" * layer + "-> " + mod.name + freq_txt +("" if mod.conditions is None else " (Condition: " + mod.conditions + ")") + ":\n"
-
+    resp = ("\t" * layer) + "-> " + mod.name + freq_txt +("" if mod.conditions is None else " (Condition: " + mod.conditions + ")") + ":\n"
+    
+    if freq < 5:
+        return resp
     # Printing inclusions
     
     for inclusion in mod.inclusions:
-        resp += "\t" * (layer + 1) + inclusion
+        resp += "\t" * (layer + 1) + inclusion + "\n"
 			
 	#Printing affectations
-
+    mod.affectations.sort(key= lambda x: x.appearance,reverse=True)
     for aff in mod.affectations:
-        
-        resp += "\t" * (layer + 1) + " $" + mod.affectations[aff].display() + "\n"
+        if (calc_aff_appearance(aff) * 100) > 4:
+            resp += ("\t" * (layer + 1)) + " $" + aff.display() + "\n"
+        else:
+            break
 	
-	#Printing submodules
-
+	#Printing submodule
+    mod.sub_modules.sort(key= lambda x: x.appearance,reverse=True)
+    
     for sub_module in mod.sub_modules:
         resp += print_module(sub_module,layer + 1)
 	
@@ -409,7 +436,7 @@ if __name__ == '__main__':
     
     print(f" Files scanned : {file_count} ! \n Rows analyzed : {row_count} ! \n Data obtained : {data_count} !")
     
-    # ----- END -----
+    
     
     
     
